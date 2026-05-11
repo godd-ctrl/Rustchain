@@ -28,6 +28,20 @@ def _finalize_epoch_node():
 
 
 class TestEpochUtxoDualWriteGuard(unittest.TestCase):
+    def test_epoch_reward_account_credit_uses_micro_rtc_unit(self):
+        _, source = _finalize_epoch_node()
+
+        self.assertIn(
+            "Decimal(ACCOUNT_UNIT)",
+            source,
+            "account-model epoch rewards must be credited in micro-RTC units",
+        )
+        self.assertNotIn(
+            "Decimal(100000000)",
+            source,
+            "account-model epoch rewards must not use UTXO nano-RTC units",
+        )
+
     def test_epoch_reward_utxo_write_respects_feature_gate(self):
         _, source = _finalize_epoch_node()
 
@@ -71,6 +85,20 @@ class TestEpochUtxoDualWriteGuard(unittest.TestCase):
             "if not utxo_ok",
             source,
             "finalize_epoch() must abort instead of committing account rewards when UTXO apply fails",
+        )
+
+    def test_epoch_reward_utxo_output_converts_from_account_units(self):
+        _, source = _finalize_epoch_node()
+
+        self.assertIn(
+            "account_i64_to_utxo_nrtc(amount_i64)",
+            source,
+            "UTXO dual-write outputs must convert micro-RTC account rewards to nano-RTC",
+        )
+        self.assertNotIn(
+            '"value_nrtc": amount_i64',
+            source,
+            "UTXO dual-write must not reuse micro-RTC account units directly",
         )
 
 

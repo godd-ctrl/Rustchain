@@ -37,13 +37,16 @@ try:
 except Exception as e:
     print(f"WARN: Rewards module not loaded: {e}")
     HAVE_REWARDS = False
+    UNIT = 1_000_000  # Account balances are stored as micro-RTC.
+    PER_EPOCH_URTC = int(1.5 * UNIT)
 
 # UTXO Layer (Phase 1 — dual-write alongside account model)
 UTXO_DUAL_WRITE = os.environ.get("UTXO_DUAL_WRITE", "0") == "1"
 try:
-    from utxo_db import UtxoDB
+    from utxo_db import UtxoDB, UNIT as UTXO_UNIT
     HAVE_UTXO = True
 except ImportError:
+    UTXO_UNIT = 100_000_000
     HAVE_UTXO = False
     if UTXO_DUAL_WRITE:
         print("[WARN] utxo_db.py not found but UTXO_DUAL_WRITE=1 — disabling")
@@ -51,6 +54,15 @@ except ImportError:
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from hashlib import blake2b
+
+ACCOUNT_UNIT = UNIT
+ACCOUNT_UNIT_FLOAT = float(ACCOUNT_UNIT)
+ACCOUNT_TO_UTXO_SCALE = UTXO_UNIT // ACCOUNT_UNIT
+
+
+def account_i64_to_utxo_nrtc(amount_i64: int) -> int:
+    """Convert account-model micro-RTC balances to UTXO nano-RTC values."""
+    return int(amount_i64) * ACCOUNT_TO_UTXO_SCALE
 
 # RIP-201: Fleet Detection Immune System
 try:
@@ -2930,15 +2942,15 @@ def finalize_epoch(epoch, per_block_rtc, prev_block_hash: bytes = b""):
             for pk, weight in miners:
                 # Use Decimal arithmetic to avoid float precision loss
                 amount_decimal = Decimal(0) if Decimal(total_weight) == 0 else total_reward * Decimal(weight) / Decimal(total_weight)
-                amount_i64 = int(amount_decimal * Decimal(100000000))
+                amount_i64 = int(amount_decimal * Decimal(ACCOUNT_UNIT))
 
                 # OVERFLOW PROTECTION: Ensure amount_i64 fits in signed 64-bit int
                 if amount_i64 >= 2**63:
                     raise ValueError(f"Reward overflow for miner {pk}: {amount_i64}")
 
                 c.execute(
-                    "UPDATE balances SET amount_i64 = amount_i64 + ?, balance_rtc = (amount_i64 + ?) / 100000000.0 WHERE miner_id = ?",
-                    (amount_i64, amount_i64, pk)
+                    "UPDATE balances SET amount_i64 = amount_i64 + ?, balance_rtc = (amount_i64 + ?) / ? WHERE miner_id = ?",
+                    (amount_i64, amount_i64, ACCOUNT_UNIT_FLOAT, pk)
                 )
 
                 # Sync to UTXO layer only when the dual-write feature is enabled.
@@ -2949,7 +2961,7 @@ def finalize_epoch(epoch, per_block_rtc, prev_block_hash: bytes = b""):
                     utxo_tx = {
                         "tx_type": "mining_reward",
                         "inputs": [],
-                        "outputs": [{"address": pk, "value_nrtc": amount_i64}],
+                        "outputs": [{"address": pk, "value_nrtc": account_i64_to_utxo_nrtc(amount_i64)}],
                         "_allow_minting": True
                     }
                     utxo_ok = UtxoDB(DB_PATH).apply_transaction(
@@ -5465,7 +5477,7 @@ def bounty_multiplier():
             ("founder_community",)
         ).fetchone()
         total_paid_urtc = row[0] if row else 0
-        total_paid_rtc = total_paid_urtc / 100000000.0
+        total_paid_rtc = total_paid_urtc / ACCOUNT_UNIT
 
         # Current balance
         bal_row = c.execute(
@@ -6771,7 +6783,7 @@ def confirm_pending():
                 # Execute the actual transfer
                 c.execute("INSERT OR IGNORE INTO balances (miner_id, amount_i64) VALUES (?, 0)", (to_m,))
                 c.execute("UPDATE balances SET amount_i64 = amount_i64 - ? WHERE miner_id = ?", (amount, from_m))
-                c.execute("UPDATE balances SET amount_i64 = amount_i64 + ?, balance_rtc = (amount_i64 + ?) / 100000000.0 WHERE miner_id = ?", (amount, amount, to_m))
+                c.execute("UPDATE balances SET amount_i64 = amount_i64 + ?, balance_rtc = (amount_i64 + ?) / ? WHERE miner_id = ?", (amount, amount, ACCOUNT_UNIT_FLOAT, to_m))
                 
                 # Log to IMMUTABLE ledger (the real chain!)
                 c.execute("""
@@ -6909,7 +6921,7 @@ def wallet_transfer_OLD():
 
         c.execute("INSERT OR IGNORE INTO balances (miner_id, amount_i64) VALUES (?, 0)", (to_miner,))
         c.execute("UPDATE balances SET amount_i64 = amount_i64 - ? WHERE miner_id = ?", (amount_i64, from_miner))
-        c.execute("UPDATE balances SET amount_i64 = amount_i64 + ?, balance_rtc = (amount_i64 + ?) / 100000000.0 WHERE miner_id = ?", (amount_i64, amount_i64, to_miner))
+        c.execute("UPDATE balances SET amount_i64 = amount_i64 + ?, balance_rtc = (amount_i64 + ?) / ? WHERE miner_id = ?", (amount_i64, amount_i64, ACCOUNT_UNIT_FLOAT, to_miner))
 
         sender_new = c.execute("SELECT amount_i64 FROM balances WHERE miner_id = ?", (from_miner,)).fetchone()[0]
         recipient_new = c.execute("SELECT amount_i64 FROM balances WHERE miner_id = ?", (to_miner,)).fetchone()[0]
